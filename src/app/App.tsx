@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { DndProvider } from "react-dnd";
 import { HTML5Backend } from "react-dnd-html5-backend";
 import { SongRow } from "@/app/components/SongRow";
@@ -44,6 +44,30 @@ const colorPalette = [
   "from-pink-400 to-rose-500",
 ];
 
+// Format timestamp for display
+const formatLastSaved = (date: Date | null): string => {
+  if (!date) return "Never saved";
+  
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+  
+  if (diffMins < 1) return "Just now";
+  if (diffMins < 60) return `${diffMins} minute${diffMins === 1 ? '' : 's'} ago`;
+  if (diffHours < 24) return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`;
+  if (diffDays < 7) return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
+  
+  // For older dates, show formatted date
+  return date.toLocaleDateString('en-US', { 
+    month: 'short', 
+    day: 'numeric', 
+    hour: 'numeric', 
+    minute: '2-digit' 
+  });
+};
+
 const initialSongs: Song[] = [
   { id: 1, number: 1, title: "Get Back", bpm: 120, color: "from-emerald-400 to-teal-500" },
   { id: 2, number: 2, title: "Better Than This", bpm: 128, color: "from-cyan-400 to-blue-500" },
@@ -84,6 +108,11 @@ export default function App() {
   const [isListManagerOpen, setIsListManagerOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSaved, setIsSaved] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [lastSaved, setLastSaved] = useState<Date | null>(() => {
+    const saved = localStorage.getItem('lastSavedTimestamp');
+    return saved ? new Date(saved) : null;
+  });
   const [isLoadingFromCloud, setIsLoadingFromCloud] = useState(false); // Changed to false - no loading screen
   const [cloudSyncEnabled, setCloudSyncEnabled] = useState(false); // Start as false until we verify auth
   const [user, setUser] = useState<any | null>(null);
@@ -206,13 +235,11 @@ export default function App() {
     if (!user) return; // Don't save to localStorage when logged out
     localStorage.setItem('stageListSongs', JSON.stringify(songs));
     localStorage.setItem('stageListNextId', JSON.stringify(nextId));
-    setIsSaved(true);
   }, [songs, nextId, user]);
 
   useEffect(() => {
     if (!user) return; // Don't save to localStorage when logged out
     localStorage.setItem('stageListTitle', pageTitle);
-    setIsSaved(true);
   }, [pageTitle, user]);
 
   // Save metronome sound preference
@@ -323,7 +350,99 @@ export default function App() {
     loadFromCloud();
   }, [user]); // Run when user changes
 
-  // Sync to cloud whenever data changes (debounced)
+  // Use refs to access latest state values in callbacks
+  const songsRef = useRef(songs);
+  const pageTitleRef = useRef(pageTitle);
+  const nextIdRef = useRef(nextId);
+  const currentListIdRef = useRef(currentListId);
+  
+  useEffect(() => {
+    songsRef.current = songs;
+    pageTitleRef.current = pageTitle;
+    nextIdRef.current = nextId;
+    currentListIdRef.current = currentListId;
+  }, [songs, pageTitle, nextId, currentListId]);
+
+  // Shared function to save to cloud (used by both manual save and auto-save)
+  const saveToCloud = useCallback(async () => {
+    if (isLoadingFromCloud || !cloudSyncEnabled || !user) return;
+    
+    try {
+      setIsSaving(true);
+      setIsSaved(false);
+      
+      // Update or create current list in cloud
+      const listId = currentListIdRef.current;
+      if (listId) {
+        const currentList: SavedStageList = {
+          id: listId,
+          name: pageTitleRef.current,
+          songs: songsRef.current,
+          nextId: nextIdRef.current,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        
+        // Try to update, if it fails, create new
+        try {
+          await listsAPI.update(listId, {
+            name: pageTitleRef.current,
+            songs: songsRef.current,
+            nextId: nextIdRef.current,
+            updatedAt: new Date().toISOString(),
+          });
+        } catch (error) {
+          // List doesn't exist, create it
+          await listsAPI.create(currentList);
+        }
+      }
+      
+      const now = new Date();
+      setLastSaved(now);
+      localStorage.setItem('lastSavedTimestamp', now.toISOString());
+      setIsSaved(true);
+    } catch (error) {
+      console.error('Failed to sync to cloud:', error);
+      setIsSaved(false); // Keep as unsaved if error occurred
+    } finally {
+      setIsSaving(false);
+    }
+  }, [isLoadingFromCloud, cloudSyncEnabled, user]);
+
+  // Manual save handler
+  const handleSave = async () => {
+    // Save to localStorage first
+    if (user) {
+      localStorage.setItem('stageListSongs', JSON.stringify(songs));
+      localStorage.setItem('stageListNextId', JSON.stringify(nextId));
+      localStorage.setItem('stageListTitle', pageTitle);
+    }
+    
+    // Then save to cloud if logged in
+    if (cloudSyncEnabled && user) {
+      await saveToCloud();
+    } else {
+      // If not logged in, just update timestamp for localStorage save
+      const now = new Date();
+      setLastSaved(now);
+      localStorage.setItem('lastSavedTimestamp', now.toISOString());
+      setIsSaved(true);
+    }
+  };
+
+  // Auto-save to cloud every 5 minutes (for logged-in users)
+  useEffect(() => {
+    if (!cloudSyncEnabled || !user) return;
+    
+    // Set up interval for every 5 minutes
+    const intervalId = setInterval(() => {
+      saveToCloud();
+    }, 5 * 60 * 1000); // 5 minutes
+    
+    return () => clearInterval(intervalId);
+  }, [cloudSyncEnabled, user, saveToCloud]);
+
+  // Auto-sync to cloud whenever data changes (debounced) - CRITICAL for persistence
   useEffect(() => {
     if (isLoadingFromCloud || !cloudSyncEnabled || !user) return;
     
@@ -354,16 +473,19 @@ export default function App() {
             // List doesn't exist, create it
             await listsAPI.create(currentList);
           }
+          
+          const now = new Date();
+          setLastSaved(now);
+          localStorage.setItem('lastSavedTimestamp', now.toISOString());
+          setIsSaved(true);
         }
-        
-        setIsSaved(true);
       } catch (error) {
         console.error('Failed to sync to cloud:', error);
-        setIsSaved(true); // Don't block the UI
+        setIsSaved(false); // Keep as unsaved if error occurred
       }
     };
     
-    // Debounce the sync to avoid too many requests
+    // Debounce the sync to avoid too many requests (1 second delay)
     const timeoutId = setTimeout(syncToCloud, 1000);
     return () => clearTimeout(timeoutId);
   }, [songs, pageTitle, nextId, currentListId, isLoadingFromCloud, cloudSyncEnabled, user]);
@@ -869,22 +991,27 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Save Indicator - Only show for logged-in users */}
+                {/* Save Button and Timestamp - Only show for logged-in users */}
                 {user && (
-                  <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold transition-all w-fit ${
-                    isSaved 
-                      ? 'bg-green-500/90 text-white shadow-lg shadow-green-500/30' 
-                      : 'bg-yellow-500/90 text-white shadow-lg shadow-yellow-500/30 animate-pulse'
-                  }`}>
-                    <Save size={14} />
-                    <span>
-                      {isSaved ? 'Saved' : 'Saving...'}
-                    </span>
-                    {isSaved && (
-                      <span className="text-[10px]">
-                        ☁️
-                      </span>
-                    )}
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={handleSave}
+                      disabled={isSaving}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                        isSaving
+                          ? 'bg-yellow-500/90 text-white cursor-not-allowed'
+                          : isSaved
+                          ? 'bg-green-500/90 hover:bg-green-500 text-white shadow-lg shadow-green-500/30'
+                          : 'bg-orange-500/90 hover:bg-orange-500 text-white shadow-lg shadow-orange-500/30'
+                      }`}
+                      aria-label="Save stage list"
+                    >
+                      <Save size={16} className={isSaving ? 'animate-pulse' : ''} />
+                      <span>{isSaving ? 'Saving...' : 'Save'}</span>
+                    </button>
+                    <div className="text-xs text-white/60">
+                      Last saved: {formatLastSaved(lastSaved)}
+                    </div>
                   </div>
                 )}
               </div>
