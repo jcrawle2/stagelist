@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { DndProvider } from "react-dnd";
 import { HTML5Backend } from "react-dnd-html5-backend";
+import { TouchBackend } from "react-dnd-touch-backend";
 import { SongRow } from "@/app/components/SongRow";
 import { AddSongForm } from "@/app/components/AddSongForm";
 import { Footer } from "@/app/components/Footer";
@@ -83,8 +84,8 @@ export default function App() {
   });
   
   const [songs, setSongs] = useState<Song[]>(() => {
-    // Always start with empty array - will be populated from cloud for logged-in users
-    // or cleared for logged-out users in useEffect
+    // Start with empty array - will be populated from cloud for logged-in users
+    // or from guest localStorage for logged-out users in useEffect
     return [];
   });
   const [playingSongs, setPlayingSongs] = useState<Set<number>>(new Set());
@@ -214,32 +215,74 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Ensure logged-out users always have empty songs array and clear all related localStorage
+  // Handle user login/logout state changes
   useEffect(() => {
     if (!user) {
-      setSongs([]);
-      setNextId(1);
-      setPageTitle('Stage List');
+      // User logged out: load guest data and clear cloud-related data
+      console.log('👤 User logged out - loading guest data');
+      
+      // Load guest data from localStorage
+      const guestSongs = localStorage.getItem('guestStageListSongs');
+      const guestNextId = localStorage.getItem('guestStageListNextId');
+      const guestTitle = localStorage.getItem('guestStageListTitle');
+      
+      if (guestSongs) {
+        setSongs(JSON.parse(guestSongs));
+      } else {
+        setSongs([]);
+      }
+      
+      if (guestNextId) {
+        setNextId(JSON.parse(guestNextId));
+      } else {
+        setNextId(1);
+      }
+      
+      if (guestTitle) {
+        setPageTitle(guestTitle);
+      } else {
+        setPageTitle('Stage List');
+      }
+      
       setCurrentListId('default');
-      // Clear all localStorage data related to stage lists
+      
+      // Clear cloud-related localStorage (keep guest data)
       localStorage.removeItem('stageListSongs');
       localStorage.removeItem('stageListNextId');
       localStorage.removeItem('stageListTitle');
       localStorage.removeItem('currentStageListId');
       localStorage.removeItem('stageLists');
+      localStorage.removeItem('lastSavedTimestamp');
+    } else {
+      // User logged in: clear guest data (will load from cloud instead)
+      console.log('👤 User logged in - clearing guest data');
+      localStorage.removeItem('guestStageListSongs');
+      localStorage.removeItem('guestStageListNextId');
+      localStorage.removeItem('guestStageListTitle');
     }
   }, [user]);
 
-  // Auto-save to localStorage whenever songs or title changes (only for logged-in users)
+  // Auto-save to localStorage - separate storage for logged-in vs logged-out users
   useEffect(() => {
-    if (!user) return; // Don't save to localStorage when logged out
-    localStorage.setItem('stageListSongs', JSON.stringify(songs));
-    localStorage.setItem('stageListNextId', JSON.stringify(nextId));
+    if (user) {
+      // Logged in: save to regular localStorage (will also sync to cloud via auto-sync)
+      localStorage.setItem('stageListSongs', JSON.stringify(songs));
+      localStorage.setItem('stageListNextId', JSON.stringify(nextId));
+    } else {
+      // Logged out: save to guest-specific localStorage keys
+      localStorage.setItem('guestStageListSongs', JSON.stringify(songs));
+      localStorage.setItem('guestStageListNextId', JSON.stringify(nextId));
+    }
   }, [songs, nextId, user]);
 
   useEffect(() => {
-    if (!user) return; // Don't save to localStorage when logged out
-    localStorage.setItem('stageListTitle', pageTitle);
+    if (user) {
+      // Logged in: save to regular localStorage
+      localStorage.setItem('stageListTitle', pageTitle);
+    } else {
+      // Logged out: save to guest-specific localStorage
+      localStorage.setItem('guestStageListTitle', pageTitle);
+    }
   }, [pageTitle, user]);
 
   // Save metronome sound preference
@@ -260,7 +303,7 @@ export default function App() {
       try {
         setIsLoadingFromCloud(true);
         
-        // Test server health first with a timeout
+        // Test server health first with a timeout (but don't fail if it errors - try loading data anyway)
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
         
@@ -276,30 +319,58 @@ export default function App() {
           );
           clearTimeout(timeoutId);
           
-          if (!healthResponse.ok) {
-            throw new Error('Server health check returned ' + healthResponse.status);
+          if (healthResponse.ok) {
+            console.log('✅ Server is online and healthy');
+          } else {
+            console.warn('⚠️ Health check returned', healthResponse.status, '- proceeding anyway');
           }
-          
-          console.log('✅ Server is online and healthy');
-        } catch (healthError) {
+        } catch (healthError: any) {
           clearTimeout(timeoutId);
-          console.log('💡 Cloud sync is not available yet');
-          console.log('📱 Your data is safely stored locally on this device');
-          console.log('🔄 Cloud sync will activate automatically once the server is deployed');
-          setIsLoadingFromCloud(false);
-          setCloudSyncEnabled(false);
-          return; // Exit early - use localStorage only
+          // Don't exit early - health check might fail but data loading could still work
+          console.warn('⚠️ Health check failed:', healthError.message, '- proceeding to load data anyway');
         }
         
         console.log('☁️ Loading from cloud...');
         
         // Load lists from cloud
-        const cloudLists = await listsAPI.getAll();
-        console.log('📋 Cloud lists loaded:', cloudLists.length);
+        let cloudLists: SavedStageList[] = [];
+        try {
+          cloudLists = await listsAPI.getAll();
+          console.log('📋 Cloud lists loaded:', cloudLists.length);
+        } catch (listsError: any) {
+          console.error('❌ Failed to load lists from cloud:', listsError);
+          // If it's a 401, the token might be invalid - try to refresh
+          if (listsError?.message?.includes('401') || listsError?.message?.includes('Unauthorized')) {
+            console.log('🔄 Attempting to refresh session...');
+            try {
+              const { data: { session }, error } = await supabase.auth.refreshSession();
+              if (error) {
+                console.error('❌ Failed to refresh session:', error);
+                throw listsError;
+              }
+              if (session) {
+                console.log('✅ Session refreshed, retrying...');
+                cloudLists = await listsAPI.getAll();
+                console.log('📋 Cloud lists loaded after refresh:', cloudLists.length);
+              }
+            } catch (refreshError) {
+              console.error('❌ Failed to refresh and retry:', refreshError);
+              throw listsError;
+            }
+          } else {
+            throw listsError;
+          }
+        }
         
         // Load settings from cloud
-        const cloudSettings = await settingsAPI.get();
-        console.log('⚙️ Cloud settings loaded');
+        let cloudSettings = { metronomeSound: 'click', metronomeVolume: 0.3 };
+        try {
+          cloudSettings = await settingsAPI.get();
+          console.log('⚙️ Cloud settings loaded');
+        } catch (settingsError: any) {
+          console.warn('⚠️ Failed to load settings from cloud, using defaults:', settingsError);
+          // Use defaults, don't fail completely
+        }
         
         // Migrate localStorage data to cloud if cloud is empty
         const localListsJson = localStorage.getItem('stageLists');
@@ -317,6 +388,21 @@ export default function App() {
             metronomeVolume: volume 
           });
           console.log('✅ Migration complete');
+          // Reload lists after migration
+          const migratedLists = await listsAPI.getAll();
+          localStorage.setItem('stageLists', JSON.stringify(migratedLists));
+          if (migratedLists.length > 0) {
+            const currentId = localStorage.getItem('currentStageListId');
+            const currentList = migratedLists.find(list => list.id === currentId) || migratedLists[0];
+            if (currentList) {
+              setSongs(currentList.songs);
+              setNextId(currentList.nextId);
+              setPageTitle(currentList.name);
+              setCurrentListId(currentList.id);
+              currentListIdRef.current = currentList.id;
+              console.log('📋 Loaded migrated list:', currentList.id, 'with', currentList.songs.length, 'songs');
+            }
+          }
         } else if (cloudLists.length > 0) {
           console.log('📥 Using cloud data...');
           localStorage.setItem('stageLists', JSON.stringify(cloudLists));
@@ -330,11 +416,53 @@ export default function App() {
             setNextId(currentList.nextId);
             setPageTitle(currentList.name);
             setCurrentListId(currentList.id);
+            currentListIdRef.current = currentList.id;
+            console.log('📋 Loaded list:', currentList.id, 'with', currentList.songs.length, 'songs');
+          } else {
+            // No matching list found, use the first one
+            const firstList = cloudLists[0];
+            if (firstList) {
+              setSongs(firstList.songs);
+              setNextId(firstList.nextId);
+              setPageTitle(firstList.name);
+              setCurrentListId(firstList.id);
+              currentListIdRef.current = firstList.id;
+              localStorage.setItem('currentStageListId', firstList.id);
+              console.log('📋 Loaded first list:', firstList.id, 'with', firstList.songs.length, 'songs');
+            }
           }
           
           // Load settings
           setMetronomeSound(cloudSettings.metronomeSound as MetronomeSound);
           setVolume(cloudSettings.metronomeVolume);
+        } else {
+          // No cloud lists and no local lists - create a default list
+          console.log('📝 No lists found, creating default list...');
+          const defaultListId = `list_${Date.now()}`;
+          const defaultList: SavedStageList = {
+            id: defaultListId,
+            name: 'Stage List',
+            songs: [],
+            nextId: 1,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          try {
+            const created = await listsAPI.create(defaultList);
+            localStorage.setItem('stageLists', JSON.stringify([created]));
+            setCurrentListId(created.id);
+            currentListIdRef.current = created.id;
+            localStorage.setItem('currentStageListId', created.id);
+            setSongs([]);
+            setNextId(1);
+            setPageTitle('Stage List');
+            console.log('✅ Default list created:', created.id);
+          } catch (error) {
+            console.error('❌ Failed to create default list:', error);
+            // Even if creation fails, set a proper ID so auto-sync can try again
+            setCurrentListId(defaultListId);
+            localStorage.setItem('currentStageListId', defaultListId);
+          }
         }
         
         setIsLoadingFromCloud(false);
@@ -365,44 +493,71 @@ export default function App() {
 
   // Shared function to save to cloud (used by both manual save and auto-save)
   const saveToCloud = useCallback(async () => {
-    if (isLoadingFromCloud || !cloudSyncEnabled || !user) return;
+    if (isLoadingFromCloud || !cloudSyncEnabled || !user) {
+      console.log('⏸️ saveToCloud skipped:', { isLoadingFromCloud, cloudSyncEnabled, user: !!user });
+      return;
+    }
+    
+    const listId = currentListIdRef.current;
+    if (!listId) {
+      console.warn('⚠️ Cannot save: currentListId is missing');
+      return;
+    }
     
     try {
       setIsSaving(true);
       setIsSaved(false);
       
-      // Update or create current list in cloud
-      const listId = currentListIdRef.current;
-      if (listId) {
-        const currentList: SavedStageList = {
-          id: listId,
+      console.log('💾 Saving to cloud...', { 
+        listId, 
+        songsCount: songsRef.current.length,
+        pageTitle: pageTitleRef.current 
+      });
+      
+      const currentList: SavedStageList = {
+        id: listId,
+        name: pageTitleRef.current,
+        songs: songsRef.current,
+        nextId: nextIdRef.current,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      
+      // Try to update, if it fails, create new
+      try {
+        const updated = await listsAPI.update(listId, {
           name: pageTitleRef.current,
           songs: songsRef.current,
           nextId: nextIdRef.current,
-          createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
-        };
-        
-        // Try to update, if it fails, create new
+        });
+        console.log('✅ List updated in cloud:', updated.id);
+      } catch (updateError: any) {
+        // List doesn't exist, create it
+        console.log('📝 List not found, creating new list...');
         try {
-          await listsAPI.update(listId, {
-            name: pageTitleRef.current,
-            songs: songsRef.current,
-            nextId: nextIdRef.current,
-            updatedAt: new Date().toISOString(),
-          });
-        } catch (error) {
-          // List doesn't exist, create it
-          await listsAPI.create(currentList);
+          const created = await listsAPI.create(currentList);
+          console.log('✅ List created in cloud:', created.id);
+        } catch (createError) {
+          console.error('❌ Failed to create list:', createError);
+          throw createError;
         }
       }
+      
+      // Update localStorage to keep it in sync
+      const savedListsJson = localStorage.getItem('stageLists');
+      const savedLists: SavedStageList[] = savedListsJson ? JSON.parse(savedListsJson) : [];
+      const updatedLists = savedLists.filter(list => list.id !== listId);
+      updatedLists.push(currentList);
+      localStorage.setItem('stageLists', JSON.stringify(updatedLists));
       
       const now = new Date();
       setLastSaved(now);
       localStorage.setItem('lastSavedTimestamp', now.toISOString());
       setIsSaved(true);
+      console.log('✅ Save complete');
     } catch (error) {
-      console.error('Failed to sync to cloud:', error);
+      console.error('❌ Failed to sync to cloud:', error);
       setIsSaved(false); // Keep as unsaved if error occurred
     } finally {
       setIsSaving(false);
@@ -444,49 +599,90 @@ export default function App() {
 
   // Auto-sync to cloud whenever data changes (debounced) - CRITICAL for persistence
   useEffect(() => {
-    if (isLoadingFromCloud || !cloudSyncEnabled || !user) return;
+    if (isLoadingFromCloud || !cloudSyncEnabled || !user) {
+      console.log('⏸️ Auto-sync skipped:', { isLoadingFromCloud, cloudSyncEnabled, user: !!user });
+      return;
+    }
+    
+    // Ensure we have a valid list ID (not 'default')
+    let listIdToUse = currentListId;
+    if (!listIdToUse || listIdToUse === 'default') {
+      const newListId = `list_${Date.now()}`;
+      console.log('🆕 Replacing invalid/default list ID with:', newListId);
+      setCurrentListId(newListId);
+      currentListIdRef.current = newListId;
+      localStorage.setItem('currentStageListId', newListId);
+      listIdToUse = newListId;
+    }
     
     const syncToCloud = async () => {
       try {
+        // Use the ref to get the latest list ID in case it was just updated
+        const finalListId = currentListIdRef.current || listIdToUse;
+        
+        console.log('💾 Auto-syncing to cloud...', { 
+          listId: finalListId, 
+          songsCount: songs.length,
+          pageTitle 
+        });
         setIsSaved(false);
         
-        // Update or create current list in cloud
-        if (currentListId) {
-          const currentList: SavedStageList = {
-            id: currentListId,
+        const currentList: SavedStageList = {
+          id: finalListId,
+          name: pageTitle,
+          songs,
+          nextId,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        
+        // Try to update, if it fails, create new
+        try {
+          const updated = await listsAPI.update(finalListId, {
             name: pageTitle,
             songs,
             nextId,
-            createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
-          };
-          
-          // Try to update, if it fails, create new
+          });
+          console.log('✅ List updated in cloud:', updated.id);
+        } catch (updateError: any) {
+          // List doesn't exist, create it
+          console.log('📝 List not found, creating new list...', updateError);
           try {
-            await listsAPI.update(currentListId, {
-              name: pageTitle,
-              songs,
-              nextId,
-              updatedAt: new Date().toISOString(),
-            });
-          } catch (error) {
-            // List doesn't exist, create it
-            await listsAPI.create(currentList);
+            const created = await listsAPI.create(currentList);
+            console.log('✅ List created in cloud:', created.id);
+            // Update the list ID if it was different
+            if (created.id !== finalListId) {
+              setCurrentListId(created.id);
+              currentListIdRef.current = created.id;
+              localStorage.setItem('currentStageListId', created.id);
+            }
+          } catch (createError) {
+            console.error('❌ Failed to create list:', createError);
+            throw createError;
           }
-          
-          const now = new Date();
-          setLastSaved(now);
-          localStorage.setItem('lastSavedTimestamp', now.toISOString());
-          setIsSaved(true);
         }
+        
+        // Update localStorage to keep it in sync
+        const savedListsJson = localStorage.getItem('stageLists');
+        const savedLists: SavedStageList[] = savedListsJson ? JSON.parse(savedListsJson) : [];
+        const updatedLists = savedLists.filter(list => list.id !== finalListId);
+        updatedLists.push(currentList);
+        localStorage.setItem('stageLists', JSON.stringify(updatedLists));
+        
+        const now = new Date();
+        setLastSaved(now);
+        localStorage.setItem('lastSavedTimestamp', now.toISOString());
+        setIsSaved(true);
+        console.log('✅ Auto-sync complete');
       } catch (error) {
-        console.error('Failed to sync to cloud:', error);
+        console.error('❌ Failed to sync to cloud:', error);
         setIsSaved(false); // Keep as unsaved if error occurred
       }
     };
     
-    // Debounce the sync to avoid too many requests (1 second delay)
-    const timeoutId = setTimeout(syncToCloud, 1000);
+    // Debounce the sync to avoid too many requests (500ms delay for faster saves)
+    const timeoutId = setTimeout(syncToCloud, 500);
     return () => clearTimeout(timeoutId);
   }, [songs, pageTitle, nextId, currentListId, isLoadingFromCloud, cloudSyncEnabled, user]);
 
@@ -531,6 +727,38 @@ export default function App() {
     };
     setSongs([...songs, newSong]);
     setNextId(nextId + 1);
+    
+    // If user is logged in and cloud sync is enabled, ensure we have a valid list ID
+    if (user && cloudSyncEnabled && !isLoadingFromCloud) {
+      // If currentListId is 'default' or invalid, create a new list ID
+      const currentId = currentListIdRef.current;
+      if (!currentId || currentId === 'default') {
+        const newListId = `list_${Date.now()}`;
+        setCurrentListId(newListId);
+        currentListIdRef.current = newListId;
+        localStorage.setItem('currentStageListId', newListId);
+        console.log('🆕 Created new list ID:', newListId);
+        
+        // Trigger save with new list ID after state updates
+        setTimeout(() => {
+          if (user && cloudSyncEnabled && !isLoadingFromCloud) {
+            console.log('🎵 Song added to new list, triggering immediate save...');
+            saveToCloud();
+          }
+        }, 200);
+      } else {
+        // Trigger an immediate save for existing list
+        setTimeout(() => {
+          if (user && cloudSyncEnabled && !isLoadingFromCloud) {
+            console.log('🎵 Song added, triggering immediate save...');
+            saveToCloud();
+          }
+        }, 200);
+      }
+    } else if (!user) {
+      // Logged out: just save to guest localStorage (already handled by useEffect)
+      console.log('🎵 Song added (guest mode - saved to localStorage only, not cloud)');
+    }
   };
 
   const editSong = (id: number, title: string, bpm: number) => {
@@ -832,6 +1060,42 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
+      // Save current data to cloud BEFORE logging out
+      if (user && cloudSyncEnabled && !isLoadingFromCloud) {
+        console.log('💾 Saving data to cloud before logout...');
+        try {
+          const listId = currentListIdRef.current;
+          if (listId) {
+            const currentList: SavedStageList = {
+              id: listId,
+              name: pageTitleRef.current,
+              songs: songsRef.current,
+              nextId: nextIdRef.current,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+            
+            // Try to update, if it fails, create new
+            try {
+              await listsAPI.update(listId, {
+                name: pageTitleRef.current,
+                songs: songsRef.current,
+                nextId: nextIdRef.current,
+                updatedAt: new Date().toISOString(),
+              });
+              console.log('✅ Data saved to cloud before logout');
+            } catch (error) {
+              // List doesn't exist, create it
+              await listsAPI.create(currentList);
+              console.log('✅ Data created in cloud before logout');
+            }
+          }
+        } catch (saveError) {
+          console.error('⚠️ Failed to save data before logout:', saveError);
+          // Continue with logout even if save fails
+        }
+      }
+      
       await authService.signOut();
       setUser(null);
       setCloudSyncEnabled(false);
@@ -846,8 +1110,22 @@ export default function App() {
     }
   };
 
+  // Detect if device supports touch (memoized to avoid recalculation)
+  const isTouchDevice = useRef(
+    typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0)
+  ).current;
+  
+  // Use TouchBackend for mobile devices, HTML5Backend for desktop
+  const backend = isTouchDevice ? TouchBackend : HTML5Backend;
+  const backendOptions = isTouchDevice ? {
+    enableMouseEvents: true, // Allow mouse events on touch devices too
+    delay: 0, // No delay for better responsiveness
+    delayTouchStart: 0,
+    touchSlop: 5, // Minimum movement before drag starts
+  } : undefined;
+
   return (
-    <DndProvider backend={HTML5Backend}>
+    <DndProvider backend={backend} options={backendOptions}>
       <div className="leading-[normal] not-italic min-h-full flex flex-col bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
         {/* Navigation Bar */}
         <nav className="sticky top-0 z-50 backdrop-blur-md bg-slate-900/80 border-b border-white/10">
@@ -990,6 +1268,13 @@ export default function App() {
                     </>
                   )}
                 </div>
+
+                {/* Saved Status Text */}
+                {isSaved && (
+                  <div className="text-xs text-white/60">
+                    Stage list saved
+                  </div>
+                )}
 
                 {/* Save Button and Timestamp - Only show for logged-in users */}
                 {user && (

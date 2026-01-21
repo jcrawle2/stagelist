@@ -248,7 +248,8 @@ export function SongRow({ id, number, title, bpm, color, isPlaying, isLocked, on
           {/* Playing Indicator or Drag Handle */}
           <div 
             ref={dragHandleRef}
-            className="text-white/40 active:text-white/60 cursor-grab active:cursor-grabbing transition-colors touch-none"
+            className="text-white/40 active:text-white/60 cursor-grab active:cursor-grabbing transition-colors touch-none select-none"
+            style={{ touchAction: 'none' }}
           >
             {isPlaying ? (
               <div className="flex gap-1 items-center justify-center w-5">
@@ -335,7 +336,8 @@ export function SongRow({ id, number, title, bpm, color, isPlaying, isLocked, on
         {/* Playing Indicator or Drag Handle */}
         <div 
           ref={dragHandleRef}
-          className="text-white/40 hover:text-white/60 cursor-grab active:cursor-grabbing transition-colors"
+          className="text-white/40 hover:text-white/60 cursor-grab active:cursor-grabbing transition-colors select-none"
+          style={{ touchAction: 'none' }}
         >
           {isPlaying ? (
             <div className="flex gap-1 items-center justify-center">
