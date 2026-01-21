@@ -90,8 +90,11 @@ export default function App() {
 
   // Ensure StageListManager never opens for non-logged-in users
   useEffect(() => {
-    if (!user && isListManagerOpen) {
-      setIsListManagerOpen(false);
+    if (!user) {
+      // Force close StageListManager if user is not logged in
+      if (isListManagerOpen) {
+        setIsListManagerOpen(false);
+      }
     }
   }, [user, isListManagerOpen]);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -182,27 +185,35 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Ensure logged-out users always have empty songs array
+  // Ensure logged-out users always have empty songs array and clear all related localStorage
   useEffect(() => {
     if (!user) {
       setSongs([]);
       setNextId(1);
+      setPageTitle('Stage List');
+      setCurrentListId('default');
+      // Clear all localStorage data related to stage lists
       localStorage.removeItem('stageListSongs');
       localStorage.removeItem('stageListNextId');
+      localStorage.removeItem('stageListTitle');
+      localStorage.removeItem('currentStageListId');
+      localStorage.removeItem('stageLists');
     }
   }, [user]);
 
-  // Auto-save to localStorage whenever songs or title changes
+  // Auto-save to localStorage whenever songs or title changes (only for logged-in users)
   useEffect(() => {
+    if (!user) return; // Don't save to localStorage when logged out
     localStorage.setItem('stageListSongs', JSON.stringify(songs));
     localStorage.setItem('stageListNextId', JSON.stringify(nextId));
     setIsSaved(true);
-  }, [songs, nextId]);
+  }, [songs, nextId, user]);
 
   useEffect(() => {
+    if (!user) return; // Don't save to localStorage when logged out
     localStorage.setItem('stageListTitle', pageTitle);
     setIsSaved(true);
-  }, [pageTitle]);
+  }, [pageTitle, user]);
 
   // Save metronome sound preference
   useEffect(() => {
@@ -1021,26 +1032,29 @@ export default function App() {
           title={pageTitle}
           songCount={songs.length}
         />
-        <StageListManager
-          isOpen={isListManagerOpen}
-          onClose={() => setIsListManagerOpen(false)}
-          currentListId={currentListId}
-          currentListName={pageTitle}
-          currentSongs={songs}
-          currentNextId={nextId}
-          onLoadList={handleLoadList}
-          onSaveCurrentAs={handleSaveCurrentAs}
-          onRenameList={handleRenameList}
-          onDeleteList={handleDeleteList}
-          onCreateNewList={handleCreateNewList}
-          onDuplicateList={handleDuplicateList}
-          user={user}
-          onOpenAuth={(mode) => {
-            setAuthModalMode(mode);
-            setIsAuthModalOpen(true);
-          }}
-          onLogout={handleLogout}
-        />
+        {/* Only render StageListManager if user is logged in */}
+        {user && (
+          <StageListManager
+            isOpen={isListManagerOpen}
+            onClose={() => setIsListManagerOpen(false)}
+            currentListId={currentListId}
+            currentListName={pageTitle}
+            currentSongs={songs}
+            currentNextId={nextId}
+            onLoadList={handleLoadList}
+            onSaveCurrentAs={handleSaveCurrentAs}
+            onRenameList={handleRenameList}
+            onDeleteList={handleDeleteList}
+            onCreateNewList={handleCreateNewList}
+            onDuplicateList={handleDuplicateList}
+            user={user}
+            onOpenAuth={(mode) => {
+              setAuthModalMode(mode);
+              setIsAuthModalOpen(true);
+            }}
+            onLogout={handleLogout}
+          />
+        )}
         <SettingsModal
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
