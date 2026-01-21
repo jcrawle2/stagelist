@@ -1,6 +1,6 @@
 // Service Worker for StageList PWA
-const CACHE_NAME = 'stagelist-v1';
-const RUNTIME_CACHE = 'stagelist-runtime-v1';
+const CACHE_NAME = 'stagelist-v2';
+const RUNTIME_CACHE = 'stagelist-runtime-v2';
 
 // Assets to cache on install
 const PRECACHE_ASSETS = [
