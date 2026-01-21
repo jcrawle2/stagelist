@@ -2,7 +2,7 @@
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
   "devCommand": "pnpm dev",
-  "installCommand": "pnpm install --no-frozen-lockfile --force",
+  "installCommand": "rm -rf node_modules && pnpm store prune && pnpm install --shamefully-hoist",
   "framework": "vite",
   "rewrites": [
     {
